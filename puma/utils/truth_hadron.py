@@ -1,179 +1,123 @@
+# Hadron processing functions
 import numpy as np
-from puma.utils.billoir_preprocessing import  MaskTracks
 
-def ProcessTruthHadrons(my_data, n_jets):
+def GetOrderedHadrons(hadron_barcode, hadron_parent, n_max_showers = 2):
+    # This function orderes the hadron indices inside each jet in different showers
+    # INPUTS:  f["truth_hadrons"]["barcode"], f["truth_hadrons"]["ftagTruthParentBarcode"]
+    # n_showers max would be n_hadrons if there were 5 unrelated showers (not likely) 
 
-    hadron = my_data["truth_hadrons"][:] 
-    max_n_hadrons = hadron["ftagTruthParentBarcode"].shape[1]
+    # Output: Padded array of indices with shape (n_jets, n_showers, n_hadrons)
+    # The showers are ordered as follows: 1st) all hadrons in the longest decay chain 2nd) hadrons in shorter decay chains 3rd) unrelated (family-less) hadrons. 
+    # The hadrons are ordered as follows: 1st parent, then children.. if there is only one hadron it is given the first element. The hadrons are separated by showers.
+    # Example of jet with 1 lonely hadron assuming n_max_showers = 2: [[0, -1, -1, -1, -1] [-1 -1 -1 -1 -1]]
+    # Example of jet with 4 hadrons, incides (0, 2, 3) belong to a same decay chain where 0 is the parent, there is olso an unrelated hadron in index 1: [[0, 2, 3, -1, -1] [1 -1 -1 -1 -1]]
+
+    n_jets, n_hadrons  = hadron_barcode.shape
+
+    set_parent_barcodes = [set(row[row > 0]) for row in hadron_parent]
+
+    # Get indices for the parton shower within a family
+    child_indices = [[[index for index, hadron in enumerate(hadron_list) if hadron == parent] for parent in parent_set]  for hadron_list, parent_set in zip(hadron_parent, set_parent_barcodes)]
+    parent_index = [[[index for index, hadron in enumerate(hadron_list) if hadron == parent] for parent in parent_set]  for hadron_list, parent_set in zip(hadron_barcode, set_parent_barcodes)]
+    family_indices = [[p[k]+c[k] for k, j in enumerate(p)] for p,c in zip(parent_index, child_indices)]
     
-    print("Max number of truth hadrons in your sample: ", max_n_hadrons)
-
-    # Make your own loop
-    child = []
-    parent = []
-
-    for i in range(0, n_jets):
-        child.append(np.isin(hadron["ftagTruthParentBarcode"][i], hadron["barcode"][i]))
-        parent.append(np.isin(hadron["barcode"][i], hadron["ftagTruthParentBarcode"][i]))
-            
-    child = np.where(hadron["ftagTruthParentBarcode"] == -1, False,np.array(child))
-    parent = np.where(hadron["barcode"] == -1, False, np.array(parent))
+    # Now reshuffle them to keep always first the longest shower!
+    #######################################################################################################
+    # Calculate lengths for all family_indices
+    lengths = np.array([len(family) for family in family_indices], dtype=object)
     
-    real_hadron = np.where(hadron["barcode"] == -1, False, True)
-    one_hadron = np.where(np.sum(real_hadron, axis =1) ==1, True, False)
+    # Create a mask for jets with more than one family member
+    mask = lengths > 1
 
-    label_hadron_index = np.where(np.sum(parent) > 0, np.argmax(parent, axis=1), np.nan)
-    label_hadron_index = np.where(one_hadron == True, 0, label_hadron_index)
-
-    child_hadron_index = np.where(np.sum(child) > 0 , np.argmax(child, axis=1), np.nan) # argmax takes the first argument from the list
-    child_hadron_index = np.where(one_hadron == True, np.nan, child_hadron_index) # make sure that if there is only one hadron, the argmax does not select 0
     
-    child2_hadron_index = np.full(child_hadron_index.shape, np.nan)
+    # Create reshuffle indices only for those jets that have more than one family
+    reshuffle = np.empty((n_jets), dtype=object) # n_max_shower
+    reshuffle[mask] = [np.argsort([len(elem) for elem in family_indices[i]])[::-1] for i in range(n_jets) if mask[i]]
 
-    for i in range (0, n_jets):
-        if (np.sum(child[i]) >= 2): 
-            for x in (np.argwhere(child[i] == 1)):
-                if x != child_hadron_index[i]:
-                    child2_hadron_index[i] = x
-                else:
-                    continue
-            
-    hadron_indices = np.stack( (label_hadron_index, child_hadron_index,  child2_hadron_index), axis = 1)
 
-    print("Total number of jets = ", n_jets)
-    n_one = np.sum(one_hadron)
-    
-    family = np.where(hadron["barcode"] == -1, False, child | parent)
-    unrelated = ((np.sum(real_hadron, axis =1) > 1) & (np.sum(family, axis =1) <= 1))
+    # Initialize sorted_family_indices
+    sorted_family_indices = np.empty(n_jets, dtype=object)
 
-    good_jets = ((one_hadron) | (np.sum(family, axis =1) > 1))
-
-    n_decay_chain = np.sum(np.where(np.sum(family, axis =1) > 1, True, False))
-    n_unrelated = np.sum(unrelated)
-    print(" -- Number of jets multiple unrelated hadrons = ",n_unrelated)
-
-    print(" -- Number of jets with only 1 SV = ",n_one)
-
-    print(" -- Number of jets with a decay chain = ",n_decay_chain)
-    if ( n_one + n_decay_chain + n_unrelated != n_jets): 
-        missing_jets = hadron[np.invert(good_jets) & np.invert(unrelated)]        
-        print("The sum of the 3 types of jets does not add up to the total number of jets!")
-        if (np.sum(np.where(missing_jets["pdgId"] != -1, 1, 0)) == 0): 
-            if (np.sum(np.where(missing_jets["flavour"] != -1, 1, 0)) == 0):
-                print("This is because for ", len(missing_jets), " non-HF jets the pdgID of all truth hadrons is -1")
-
+    # Use the reshuffle to sort family_indices
+    for i in range(n_jets):
+        if mask[i]:  # Check if the jet has more than one family member
+            sorted_indices = reshuffle[i]
+            sorted_family_indices[i] = [family_indices[i][idx] for idx in sorted_indices]
         else:
-            print("The reason is not understood for ", np.sum(np.where(missing_jets["pdgId"] != -1, 1, 0)), " jets and you should DEBUG this")
+            sorted_family_indices[i] = family_indices[i]  # Keep it unchanged if not applicable
 
-    print("   --> # jets with 2 SVs: = ",np.sum(np.where(np.sum(family, axis =1) == 2, True, False)))
-    print("   --> # jets with 3+ SVs: = ",np.sum(np.where(np.sum(family, axis =1) > 2, True, False)))
-    print("   --> # jets with 4+ SVs: = ",np.sum(np.where(np.sum(family, axis =1) > 3, True, False)))
+    # Convert to numpy array if desired
+    sorted_family_indices = np.array(sorted_family_indices, dtype=object)
+    #######################################################################################################
 
-    print(np.sum(good_jets), " good jets (= the jets with more than one unrelated hadron and light jets with no truth hadrons have been dropped )")
+    # Deal with the unrelated hadrons
 
+    orphan_barcodes = np.where((hadron_parent <0) & (hadron_barcode > 0) , hadron_barcode, 0) # hadrons without parents
+    unrelated_indices = [[[index] for index, hadron in enumerate(hadron_list) if (hadron not in parent_set) and (hadron > 0)]  for hadron_list, parent_set in zip(orphan_barcodes, set_parent_barcodes)] # remove parents
+    extended_family_indices = [f+u for f,u in zip(sorted_family_indices.copy(), unrelated_indices)]
     
-    return good_jets, hadron_indices, parent, child, one_hadron, unrelated
-
-
-def GetTruthSVdisplacement(hadrons):
-
+    # Now select the more important (first) shower and pad the indices!
     
-    hadron_displacement = np.full((hadrons.shape[0], hadrons.shape[1],3), np.nan)
-
-    for i in range(0, hadrons.shape[0]):
-        for j in range(0,  hadrons.shape[1]):
-            hadron_displacement[i,j, 0] = hadrons["displacementX"][i, j] 
-            hadron_displacement[i,j, 1] = hadrons["displacementY"][i, j]
-            hadron_displacement[i,j, 2] = hadrons["displacementZ"][i, j]
-
-    return hadron_displacement
-
-
-
-def AssociateTracksToHadron(my_data, good_jets, drop_bad_jets = True, debug=False):
+    # Initializethe padded array with -1
+    padded_hadron_indices = np.full((n_jets, n_max_showers, n_hadrons), -1)
     
-    n_jets, n_tracks = my_data["tracks"].shape
-    #track = my_data["tracks"][:, 0:n_tracks]
+    # Fill the padded array
+    for i, jet in enumerate(extended_family_indices):
+        for j, shower in enumerate(jet):
+            if j < n_max_showers:  # Limit the amount of showers
+                hadrons_to_fill = shower[:n_hadrons]  # Limit to max number of hadrons
+                padded_hadron_indices[i, j, :len(hadrons_to_fill)] = hadrons_to_fill
     
-    # Start by getting a mask of the real tracks
-    # Get real tracks
-    track_mask, n_real_tracks = MaskTracks(my_data, n_jets, n_tracks)
-    n_hadrons = my_data["truth_hadrons"].shape[1]
+    return padded_hadron_indices
+
+
+
+def AssociateTracksToHadron(track_parent, hadron_barcode, hadron_mask):
+    ##### INPUTS #####
+    # track_parent         shape (n_jets, n_tracks)   ----  barcode of the hadron that is parent of each track
+    # hadron_barcode       shape (n_jets, n_hadrons)    --- barcode of each hadron (to associate tracks to hadron index) 
+    # track_hadron_mask    shape (n_hadrons, n_jets, n_tracks) --- select only the tracks from hadrons in the most important hadron (and their children)
+    ##### OUTPUTS #####
+    # track_to_hadron_array           shape (n_jets, n_hadrons, n_tracks)    ---- SV finding track to hadron association, for each hadron. If only one track is associated to a hadron/vertex it is dropped.
+    # inclusive_track_first_hadron    shape (n_jets, n_tracks)    ---- SV finding track to the first hadron (and children) i.e. tracks associated to the first hadron (and family) are added.
+    # inclusive_track_hadron          shape (n_jets, n_tracks)    ---- SV finding track to hadrons (INCLUSIVE) i.e. tracks associated to any hadron are added.
+
+    n_jets, n_tracks = track_parent.shape
+    n_hadrons = hadron_barcode.shape[1]
+
+    track_parent = np.where(track_parent < 0, np.nan, track_parent) # use NAN so that they never match
+    track_to_hadron_array = np.array([np.where(track_parent == hadron_barcode[:, k][:, np.newaxis], 1, 0) for k in range(0, n_hadrons)]) # n_hadrons change to variable
     
-    if drop_bad_jets:
-        my_good_jets = np.repeat(good_jets, n_tracks).reshape(n_jets, n_tracks) # This is needed because jets have a different format than tracks
-        jet_track_mask = np.where(my_good_jets == True, 1, 0)
-        track_mask = track_mask & jet_track_mask
-
-    inclusive_vertex = []
-    exclusive_vertex = []
-    n_tracks_inclusive_vertex = []
-    n_tracks_exclusive_vertex = []
-    good_hadron_track_association = []
-
-    hadron_index = []
-
-    dummy = np.zeros(n_tracks).astype(int)
-
-    for i in range(0, n_jets):
-        if drop_bad_jets:
-            if good_jets[i] == False: continue
-
-
-        if debug: print("Track Parent Barcodes ", my_data["tracks"]["ftagTruthParentBarcode"][i] )
-        positive_track_barcodes = np.where(my_data["tracks"]["ftagTruthParentBarcode"][i] < 0, np.nan, my_data["tracks"]["ftagTruthParentBarcode"][i])
-        if debug: print("Hadron Barcodes ", my_data["truth_hadrons"]["barcode"][i])
-        inclusive_tracks_to_hadron = np.where(track_mask[i] == 0, 0, np.isin(positive_track_barcodes,  my_data["truth_hadrons"]["barcode"][i])).astype(int)        
-        n_tracks_inclusive_vertex.append(np.sum(inclusive_tracks_to_hadron))
-        if np.sum(inclusive_tracks_to_hadron) <= 1: 
-            inclusive_vertex.append(dummy)
-        else:
-            inclusive_vertex.append(inclusive_tracks_to_hadron)        
-        
-        tmp_exclusive_list = []
-        tmp_n_tracks = []
-        for j in range(0, n_hadrons):
-            tmp_exclusive = np.where(track_mask[i] == 0, 0, np.isin(positive_track_barcodes,  my_data["truth_hadrons"]["barcode"][i][j])).astype(int)        
-            if np.sum(tmp_exclusive) <= 1:    
-                
-                tmp_exclusive_list.append(dummy)
-            else:
-                tmp_exclusive_list.append(tmp_exclusive)
-            tmp_n_tracks.append(int(np.sum(tmp_exclusive_list[-1])))
-        n_tracks_exclusive_vertex.append(tmp_n_tracks)
+    # build the inclusive vertex if needed                                                                                                                                                                  
+    inclusive_track_hadron = np.sum(track_to_hadron_array, axis = 0)
     
-        if np.sum(n_tracks_exclusive_vertex[-1]) > 0:        
-            hadron_index.append(np.argmax(n_tracks_exclusive_vertex[-1]))
-            good_hadron_track_association.append(1)
-        else:
-            hadron_index.append(-99) # None of the hadron indices have 2 associated trakcks
-            good_hadron_track_association.append(0)
-
-
-        exclusive_vertex.append(np.array(tmp_exclusive_list)) 
-
-        if debug: print("INCLUSIVE Track to Hadron Association ", inclusive_vertex[-1])
-        if debug: print("EXCLUSIVE Track to Hadron Association ", exclusive_vertex[-1])
-        if debug: print("Index for Hadron with highest amoutn of associated tracks ", hadron_index[-1])
-        if debug: print("Number of tracks associated to the each hadron ", n_tracks_per_hadron[-1])
-        
-    inclsuive_vertex = np.array(inclusive_vertex)
-    exclusive_vertex = np.array(exclusive_vertex)
-    hadron_index = np.array(hadron_index)
-
+    # Sum tracks from hadrons in the parton shower (applying the mask)
+    track_hadron_mask = np.repeat(hadron_mask, n_tracks).reshape(n_hadrons, n_jets, n_tracks)
+    inclusive_track_first_hadron = np.sum(np.where(track_hadron_mask, track_to_hadron_array, 0), axis=0)  # apply mask and sum across the first dimension
+      
+    # mask out hadrons with only one associated track                                                                                                                                                           
+    mask_array = [np.repeat(np.where(np.sum(track_to_hadron_array[k], axis = 1) >= 2, 1, 0)[:, np.newaxis], n_tracks).reshape(n_jets, n_tracks) for k in range(0, n_hadrons)]
+    track_to_hadron_array = np.where(mask_array, track_to_hadron_array, mask_array)    
     
-    return inclusive_vertex, exclusive_vertex, hadron_index, n_tracks_inclusive_vertex, n_tracks_exclusive_vertex, track_mask, jet_track_mask, good_hadron_track_association
+    return np.array(track_to_hadron_array), inclusive_track_first_hadron,  inclusive_track_hadron
+
+def SelectHadron(truth_hadrons, hadron_index):
+    invalid_jet_mask = (hadron_index < 0)
+    
+    # Select hadron with most tracks
+    selected_hadron = truth_hadrons[np.arange(truth_hadrons.shape[0]), hadron_index.astype(int)]
+    
+    # Create a copy to preserve shape
+    selected_hadron_copy = np.copy(selected_hadron)
+    
+    # Apply the mask and set invalid entries to np.nan (or you can set to 0)
+    selected_hadron_copy[invalid_jet_mask] = -99  # Use np.nan or 0 based on preference
+
+    return selected_hadron_copy 
+
+def select_tracks(track_hadron, index, element=0):
+    rows = np.arange(track_hadron.shape[1])
+    selected_tracks = track_hadron[index[rows, element], rows, :]
+    return selected_tracks
 
 
-def TruthDisplacement_HadronMostTracks(truth_hadron_displacement, index_hadron_most_tracks, good_hadron_track_association):
-    # change -99 to 0 so that you can do the association later  
-    tmp_index = np.where(index_hadron_most_tracks == -99, 0, index_hadron_most_tracks) 
-    # Get the displacement of the hadron with most tracks (including 0 for those with no tracks)
-    MostTrackHadron_Truth_displacement = truth_hadron_displacement[np.arange(truth_hadron_displacement.shape[0]), tmp_index] 
-    # Mask the jets with no associated tracks to include the 3 coordinates
-    truth_hadron_displacement_mask = np.repeat(good_hadron_track_association_mask, 3).reshape(len(good_hadron_track_association_mask),3)
-
-    # Remove jets with no tracks from your truth displacement variables!
-    MostTrackHadron_Truth_displacement = np.where(truth_hadron_displacement_mask == 0, np.nan, MostTrackHadron_Truth_displacement)
-
-    return MostTrackHadron_Truth_displacement
