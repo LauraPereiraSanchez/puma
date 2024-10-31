@@ -15,17 +15,6 @@ def ListVariables(file_path):
 
     return
 
-def MaskTracks(my_data, n_jets, n_tracks):
-
-    n_real_tracks = np.repeat(my_data["jets"]["n_tracks"], n_tracks).reshape(n_jets, n_tracks) # This is needed because jets have a different format than tracks
-    track_indices = np.tile(
-         np.arange(0,n_tracks,dtype=np.int32),
-         n_jets,
-    ).reshape(n_jets, n_tracks)
-    
-    track_mask = np.where(track_indices < n_real_tracks, 1, 0)
-    
-    return track_mask, n_real_tracks
     
 def TransformData(my_data, good_jets, n_tracks=40, drop_unrelated_hadrons = True):
 
@@ -41,7 +30,7 @@ def TransformData(my_data, good_jets, n_tracks=40, drop_unrelated_hadrons = True
     # Start by getting a mask of the real tracks
 
     # Get real tracks
-    track_mask, n_real_tracks = MaskTracks(my_data, n_jets, n_tracks)
+    track_mask  = np.where(my_data["tracks"]["valid"], 1, 0)
 
     # Compute Input Variables for Billoir Vertex Fit
     ### set parameters for dummy tracks to 1. They will be masked out by the track weight and if you choose a very low value the fit will not work well.
@@ -72,7 +61,7 @@ def TransformData(my_data, good_jets, n_tracks=40, drop_unrelated_hadrons = True
     track_origin = jnp.where(track_mask == 0, 1, track["GN2v01_aux_TrackOrigin"])
     track_vertex = jnp.where(track_mask == 0, 1, track["GN2v01_aux_VertexIndex"])
      
-    x = jnp.stack([d0, z0, phi, theta, rho, d0_error, z0_error, phi_error, theta_error, rho_error, track_origin, track_vertex, n_real_tracks], axis = 2)
+    x = jnp.stack([d0, z0, phi, theta, rho, d0_error, z0_error, phi_error, theta_error, rho_error, track_origin, track_vertex], axis = 2)
 
     if drop_unrelated_hadrons == True:
         x = x[good_jets]
@@ -84,6 +73,7 @@ def TransformData(my_data, good_jets, n_tracks=40, drop_unrelated_hadrons = True
 
 
 # Get the vertex indices and track weights! Which tracks belong to which vertex according? The track origin is used for the cleaning
+## This is slower and uses the already implemented SV finding functions 
 def GetTrackWeights(track_data, incl_vertexing=False, truth=False, max_sv=1):
 
     if truth:
@@ -128,25 +118,3 @@ def GetTrackWeights(track_data, incl_vertexing=False, truth=False, max_sv=1):
     return track_weights, vertex_index
 
 
-def LoadDataset(file_path,kinematic_cuts,  n_jets=-1, n_tracks=40):    
-    
-    track_var = ["d0", "z0SinTheta", "dphi", "d0Uncertainty", "z0SinThetaUncertainty", "phiUncertainty", "thetaUncertainty", "qOverPUncertainty", "qOverP", "deta", "theta", "dphi"] # for vertex fit
-    track_var += ["d0RelativeToBeamspot", "d0RelativeToBeamspotUncertainty","z0RelativeToBeamspot", "z0RelativeToBeamspotUncertainty",  "ftagTruthOriginLabel",  "GN2v01_aux_TrackOrigin", "GN2v01_aux_VertexIndex",  "ftagTruthVertexIndex", "ftagTruthParentBarcode"]
-    track_var += ["JFVertexIndex", "pt"]
-    
-    jet_var = ["eventNumber","GN2v01_pb", "GN2v01_pc", "GN2v01_pu", "n_tracks", "jetPtRank", "phi", "eta", "HadronConeExclTruthLabelID", "HadronConeExclExtendedTruthLabelID", "HadronConeExclTruthLabelPdgId", "HadronConeExclTruthLabelLxy", "SV1_Lxy", "JetFitterSecondaryVertex_displacement2d", "SV1_L3d", "JetFitterSecondaryVertex_displacement3d", "JetFitter_nVTX", "mcEventWeight", "nPrimaryVertices"] # phi is needed for vertex fit if track phi is not available # v00 instead of v01
-    
-    jet_var +=['primaryVertexToBeamDisplacementX', 'primaryVertexToBeamDisplacementY', 'primaryVertexToBeamDisplacementZ', 'primaryVertexToTruthVertexDisplacementX', 'primaryVertexToTruthVertexDisplacementY', 'primaryVertexToTruthVertexDisplacementZ', 'truthPrimaryVertexX', 'truthPrimaryVertexY', 'truthPrimaryVertexZ', 'primaryVertexDetectorZ']
-    jet_var += ['JetFitterSecondaryVertex_nTracks', 'JetFitter_nTracksAtVtx', 'SV1_masssvx', 'JetFitter_mass', 'JetFitterSecondaryVertex_mass']
-    truth_hadrons = ['pt', 'mass', 'energy', 'eta', 'phi', 'deta', 'dphi', 'dr', 'displacementX', 'displacementY', 'displacementZ','Lxy', 'charge', 'flavour', 'pdgId', 'barcode', 'ftagTruthParentBarcode', 'valid',  'decayVertexDPhi', 'decayVertexDEta'] 
-    
-    
-    ## read it!
-    my_reader = H5Reader(file_path, precision="full", shuffle=False, batch_size=100)
-
-    if n_jets == -1:
-        my_data = my_reader.load({"jets": jet_var, "tracks" : track_var, "truth_hadrons" : truth_hadrons},  cuts=kinematic_cuts)
-    else:
-        my_data = my_reader.load({"jets": jet_var, "tracks" : track_var, "truth_hadrons" : truth_hadrons}, num_jets=n_jets, cuts=kinematic_cuts)
-
-    return my_data
